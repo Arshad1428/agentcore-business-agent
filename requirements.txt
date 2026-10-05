@@ -1,0 +1,5 @@
+# Runtime dependencies (these are what gets deployed to AgentCore Runtime).
+# Versions intentionally unpinned; pin them after your first working install.
+strands-agents
+bedrock-agentcore
+python-dotenv

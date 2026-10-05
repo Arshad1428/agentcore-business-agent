@@ -1,0 +1,39 @@
+{
+  "_comment": "TEMPLATE. Replace <REGION>, <ACCOUNT_ID>, <MODEL_ID>. Verify the exact action list against the current AgentCore Runtime permissions docs before use; trim anything your deployment does not need.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvokeOnlyTheConfiguredModel",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/<MODEL_ID>",
+        "arn:aws:bedrock:<REGION>:<ACCOUNT_ID>:inference-profile/<MODEL_ID>"
+      ]
+    },
+    {
+      "Sid": "PullOwnImage",
+      "Effect": "Allow",
+      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+      "Resource": "arn:aws:ecr:<REGION>:<ACCOUNT_ID>:repository/bedrock-agentcore-*"
+    },
+    {
+      "Sid": "EcrAuthToken",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "Logs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"],
+      "Resource": "arn:aws:logs:<REGION>:<ACCOUNT_ID>:log-group:/aws/bedrock-agentcore/runtimes/*"
+    },
+    {
+      "Sid": "TracingAndMetrics",
+      "Effect": "Allow",
+      "Action": ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "cloudwatch:PutMetricData"],
+      "Resource": "*"
+    }
+  ]
+}
