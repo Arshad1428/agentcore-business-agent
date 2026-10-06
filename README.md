@@ -1,7 +1,9 @@
 # AgentCore Business Process Automation Agent
 
-A single **Strands** agent that automates a small internal purchase-order workflow
-(product lookup → total calculation → *simulated* order creation). It reasons with a
+A single **Strands** agent that automates an internal purchase-order process
+(product lookup → quote → manager approval → *simulated* order creation → notification),
+available both as **configurable workflows** and as free-form LLM requests, with
+**execution tracking**. It reasons with a
 model (local **Ollama** by default, **Amazon Bedrock** optional), uses `@tool` Python
 functions, and is wrapped for **Amazon Bedrock AgentCore Runtime**.
 
@@ -19,10 +21,18 @@ User -> AgentCore Runtime -> runtime.py entrypoint -> Strands Agent -> Model (Be
                                                       Final response (+ tool trace)
 ```
 
-The workflow is **not hard-coded**. The model receives the system prompt and tool
-definitions, and Strands runs the reason → tool → reason loop. Business rules
-(quantity 1-50, valid department, product exists, stock) are enforced **inside the
-tools**, not trusted to the LLM.
+There are two ways to run the process:
+
+1. **Agent mode** (`{"prompt": ...}`): the model receives the system prompt and tool
+   definitions and Strands runs the reason → tool → reason loop. The model can also call
+   the `run_workflow` tool.
+2. **Workflow mode** (`{"workflow": ..., "inputs": ...}`): a *declarative* workflow
+   (`workflows.py`) runs its steps in a fixed order, deterministically, with no LLM. Each
+   step's output feeds later steps; the run stops on the first failure or pauses for
+   approval.
+
+Business rules (quantity 1-50, valid department, product exists, stock, **manager approval
+above 100,000 INR**) are enforced **inside the tools**, not trusted to the LLM.
 
 ## Layout
 
@@ -31,8 +41,11 @@ main.py                         local CLI (one-shot or interactive, prints tool 
 src/business_agent/config.py    env configuration only
 src/business_agent/agent.py     model provider + system prompt + tools -> Strands Agent
 src/business_agent/runtime.py   AgentCore Runtime entrypoint (wraps the same agent)
+src/business_agent/workflows.py configurable workflows (data) + step engine
+src/business_agent/executions.py bounded session cache (LRU + idle TTL) and execution records
 src/business_agent/data/        demo catalog (fictional data)
-src/business_agent/tools/       lookup_product, calculate_order_total, create_order
+src/business_agent/tools/       lookup_product, calculate_order_total, request_approval,
+                                create_order, get_order_status, send_notification, run_workflow
 tests/                          tool tests, runtime tests, LLM behaviour tests
 iam/                            least-privilege execution role policy TEMPLATE
 ```
@@ -69,10 +82,57 @@ Other prompts to try: `Create an order for monitors.` (should ask for missing in
 Small local models are less reliable at tool calling than hosted ones; if a behaviour
 test fails, check the trace before blaming the code.
 
+## Workflows
+
+Defined as data in `WORKFLOWS` (`src/business_agent/workflows.py`). To add one, add an entry
+with `inputs` and ordered `steps`; each step names a registered tool and its `args`
+(`"$input.x"` = workflow input, `"$steps.<id>.<field>"` = earlier step output). A step may
+declare `pause_if` to pause (not fail) the run.
+
+| Workflow | Inputs | Steps |
+|---|---|---|
+| `purchase_order` | product, quantity, department, *(approval_id)* | lookup → quote → approval → create → notify |
+| `order_status_check` | order_id | status |
+
+Result `workflow_status`: `completed`, `failed` (with `failed_step`; later steps are `skipped`), or
+`pending_approval` (re-run with the `approval_id` once a manager approves).
+
+## Runtime payloads
+
+```json
+{"prompt": "Create an order for 3 monitors for Engineering."}
+{"workflow": "purchase_order", "inputs": {"product": "laptop", "quantity": 2, "department": "Finance"}}
+{"action": "list_workflows"}
+{"action": "get_execution", "execution_id": "exe-..."}
+{"action": "list_executions"}
+{"action": "approve", "approval_id": "APR-..."}
+```
+
+`approve` is a manager action exposed only through the Runtime. It is **not** an agent tool, so
+the model can never approve its own request. In a real system, put it behind AgentCore Identity /
+your own authorization.
+
+Approval walkthrough (2 laptops = 170,000 INR > 100,000):
+
+```bash
+agentcore invoke '{"workflow":"purchase_order","inputs":{"product":"laptop","quantity":2,"department":"Finance"}}'   # pending_approval + approval_id
+agentcore invoke '{"action":"approve","approval_id":"APR-XXXXXXXX"}'
+agentcore invoke '{"workflow":"purchase_order","inputs":{"product":"laptop","quantity":2,"department":"Finance","approval_id":"APR-XXXXXXXX"}}'   # completed
+```
+
+State is in memory per process, so the three calls must reach the same Runtime session
+(pass the same session ID on invoke).
+
+## Execution management
+
+Every request gets an `execution_id` and a record (`kind`, `status`, timings, tool errors).
+Sessions are capped (`MAX_SESSIONS`) and expire when idle (`SESSION_TTL_SECONDS`), so a
+long-running Runtime cannot grow without bound.
+
 ## Tests
 
 ```bash
-pytest tests/test_tools.py tests/test_runtime.py     # deterministic, free, no LLM
+pytest tests/test_tools.py tests/test_runtime.py tests/test_workflows.py tests/test_executions.py   # deterministic, free, no LLM
 RUN_LLM_TESTS=1 pytest tests/test_agent.py -s        # real model: happy path, missing info,
                                                      # unknown product, bad qty, out-of-scope, tool failure
 ```
@@ -91,8 +151,9 @@ curl -s -X POST localhost:8080/invocations -H "Content-Type: application/json" \
   -d '{"prompt": "Create an order for 3 monitors for Engineering."}'
 ```
 
-Response shape: `status`, `response`, `tool_calls` (name + status), `tool_errors`,
-`session_id`, `request_id`, `latency_ms`. A bad payload returns
+Agent response shape: `status`, `response`, `tool_calls` (name + status), `tool_errors`,
+`execution_id`, `session_id`, `request_id`, `latency_ms`. Workflow responses carry
+`workflow_status`, `failed_step`, `steps`, `execution_id` instead. A bad payload returns
 `{"status":"error","error_type":"invalid_request"}` **without calling the model**; agent/model
 exceptions return `agent_execution_failed` with no stack trace.
 
@@ -133,7 +194,7 @@ count, latency, and exceptions. Prompts, tool inputs, credentials and order cont
 - Default provider is local Ollama: development and the LLM tests cost nothing.
 - Deterministic tests never call a model.
 - Bedrock is only needed for the single deployment + a handful of invocations; temperature 0, short prompt, compact tool output.
-- No databases, Gateway, MCP server, extra agents or other AWS services are created.
+- No databases, Gateway, MCP server, extra agents or other AWS services are created. Workflow mode makes no model calls at all.
 - Set an AWS Budget alert, and destroy the runtime after the demo. AgentCore Runtime has its own pricing: check current pricing/credit eligibility.
 
 ## Security notes
@@ -143,12 +204,14 @@ the one model, logs, and image pull. Order creation is simulated; no real purcha
 
 ## Limitations
 
-- Demo catalog and in-memory order store (resets when the process/session ends; stock is not decremented).
+- Demo catalog, in-memory order/approval/execution stores (reset when the process/session ends; stock is not decremented).
+- Notifications are simulated (no email is sent).
 - Behaviour quality depends on the model; local small models can mis-call tools.
 - Not a production procurement system.
 - The deployed-runtime steps have not been executed by the author of this package (see below).
 
 ## Not implemented (possible future extensions)
 
-MCP server, AgentCore Gateway, AgentCore Identity, long-term Memory, multi-agent orchestration,
-async/concurrent tools, real inventory/purchasing integration.
+MCP server, AgentCore Gateway (to expose real ERP/CRM APIs as tools), AgentCore Identity (to protect
+`approve`), long-term Memory, multi-agent orchestration, async/concurrent tools, persistent execution
+store (DynamoDB), real inventory/purchasing integration.

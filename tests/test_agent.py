@@ -37,10 +37,17 @@ def names(calls):
 
 def test_happy_path():
     _, calls = run("Create an order for 3 monitors for the Engineering department.")
-    assert "lookup_product" in names(calls) and "create_order" in names(calls)
-    assert names(calls).index("lookup_product") < names(calls).index("create_order")
+    # The model may place the order directly or via the configured workflow.
+    if "run_workflow" not in names(calls):
+        assert "lookup_product" in names(calls) and "create_order" in names(calls)
+        assert names(calls).index("lookup_product") < names(calls).index("create_order")
     orders = get_orders()
     assert len(orders) == 1 and orders[0]["quantity"] == 3 and orders[0]["department"] == "Engineering"
+
+
+def test_high_value_order_is_not_created_without_approval():
+    run("Create an order for 2 laptops for the Finance department.")
+    assert get_orders() == []
 
 
 def test_missing_information_asks_instead_of_ordering():
@@ -77,7 +84,7 @@ def test_tool_failure_is_not_reported_as_success():
 
     text, calls = run(
         "Create an order for 3 monitors for Engineering.",
-        tools=[lookup_product, calculate_order_total, create_order],
+        tools=[lookup_product, calculate_order_total, create_order],  # no run_workflow: force direct path
     )
     assert any(c["name"] == "create_order" and c["status"] == "error" for c in calls)
     assert "ORD-" not in text and get_orders() == []

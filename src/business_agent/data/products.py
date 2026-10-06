@@ -3,6 +3,7 @@ from __future__ import annotations
 
 CURRENCY = "INR"
 MAX_ORDER_QUANTITY = 50
+APPROVAL_THRESHOLD = 100000  # orders with a total above this need manager approval (INR)
 ALLOWED_DEPARTMENTS = ("Engineering", "Finance", "HR", "Marketing", "Operations")
 
 PRODUCTS: dict[str, dict] = {

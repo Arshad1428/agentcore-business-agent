@@ -71,6 +71,12 @@ def test_create_order_rejections(args):
     assert get_orders() == []
 
 
+def test_create_order_above_threshold_needs_approval():
+    r = create_order("laptop", 2, "Finance")
+    assert r["ok"] is False and "approval" in r["error"]
+    assert get_orders() == []
+
+
 def test_simulated_failure_raises(monkeypatch):
     monkeypatch.setenv("SIMULATE_TOOL_FAILURE", "1")
     with pytest.raises(RuntimeError):

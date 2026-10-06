@@ -26,6 +26,20 @@ class Settings:
     aws_region: str | None
     bedrock_model_id: str | None
     log_level: str
+    max_sessions: int = 100
+    session_ttl_seconds: int = 1800
+
+
+def _int(value, default: int, name: str) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        n = int(value)
+    except ValueError:
+        raise ConfigError(f"{name} must be a whole number, got '{value}'") from None
+    if n <= 0:
+        raise ConfigError(f"{name} must be greater than zero")
+    return n
 
 
 def load_settings(env: dict | None = None) -> Settings:
@@ -41,6 +55,8 @@ def load_settings(env: dict | None = None) -> Settings:
         aws_region=e.get("AWS_REGION") or e.get("AWS_DEFAULT_REGION") or None,
         bedrock_model_id=e.get("BEDROCK_MODEL_ID") or None,
         log_level=(e.get("LOG_LEVEL") or "INFO").upper(),
+        max_sessions=_int(e.get("MAX_SESSIONS"), 100, "MAX_SESSIONS"),
+        session_ttl_seconds=_int(e.get("SESSION_TTL_SECONDS"), 1800, "SESSION_TTL_SECONDS"),
     )
     if provider == "bedrock":
         missing = [
